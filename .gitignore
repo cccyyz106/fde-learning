@@ -1,0 +1,26 @@
+# env
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+.next/
+out/
+
+# private data
+day4/documents/
+day4/history.json
+day4/chroma_db/
+
+# logs
+*.log
+
+# system
+.DS_Store
+Thumbs.db

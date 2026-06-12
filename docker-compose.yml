@@ -1,0 +1,23 @@
+services:
+  backend:
+    build:
+      context: ./day4
+    container_name: fde-ai-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./day4/.env
+    volumes:
+      - ./day4/documents:/app/documents
+      - ./day4/history.json:/app/history.json
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./day15-frontend
+    container_name: fde-ai-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped

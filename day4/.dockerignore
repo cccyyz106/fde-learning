@@ -1,0 +1,10 @@
+.venv
+__pycache__
+*.pyc
+.git
+.env
+documents
+history.json
+chroma_db
+Dockerfile
+.dockerignore
