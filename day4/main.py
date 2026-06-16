@@ -27,10 +27,10 @@ collection = chroma_client.get_or_create_collection(name="company_docs")
 
 app = FastAPI()
 
-app.add_middleware(
+app.add_middlewareapp.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
