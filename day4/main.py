@@ -1,20 +1,24 @@
 import os
 import json
+import base64
+import hashlib
+import hmac
+import time
 from datetime import datetime
 import shutil
 from pathlib import Path
+import bcrypt
 
 import chromadb
 from docx import Document
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from pydantic import BaseModel
 from pypdf import PdfReader
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-
 load_dotenv()
 
 client = OpenAI(
@@ -27,7 +31,93 @@ collection = chroma_client.get_or_create_collection(name="company_docs")
 
 app = FastAPI()
 
-app.add_middlewareapp.add_middleware(
+USERS_FILE = "users.json"
+TOKEN_SECRET = os.getenv("TOKEN_SECRET", "dev-secret-change-me")
+
+
+def load_users():
+    if not os.path.exists(USERS_FILE):
+        return []
+
+    with open(USERS_FILE, "r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def save_users(users):
+    with open(USERS_FILE, "w", encoding="utf-8") as file:
+        json.dump(users, file, ensure_ascii=False, indent=2)
+
+
+def hash_password(password: str) -> str:
+    password_bytes = password.encode("utf-8")
+    hashed = bcrypt.hashpw(password_bytes, bcrypt.gensalt())
+    return hashed.decode("utf-8")
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    password_bytes = password.encode("utf-8")
+    hash_bytes = password_hash.encode("utf-8")
+    return bcrypt.checkpw(password_bytes, hash_bytes)
+
+
+def create_token(username: str) -> str:
+    payload = {
+        "username": username,
+        "exp": int(time.time()) + 60 * 60 * 24
+    }
+
+    payload_text = json.dumps(payload, ensure_ascii=False)
+    payload_base64 = base64.urlsafe_b64encode(payload_text.encode("utf-8")).decode("utf-8")
+
+    signature = hmac.new(
+        TOKEN_SECRET.encode("utf-8"),
+        payload_base64.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+
+    return f"{payload_base64}.{signature}"
+
+
+def read_token(token: str):
+    try:
+        payload_base64, signature = token.split(".")
+
+        expected_signature = hmac.new(
+            TOKEN_SECRET.encode("utf-8"),
+            payload_base64.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+
+        if not hmac.compare_digest(signature, expected_signature):
+            raise HTTPException(status_code=401, detail="登录状态无效。")
+
+        payload_text = base64.urlsafe_b64decode(payload_base64.encode("utf-8")).decode("utf-8")
+        payload = json.loads(payload_text)
+
+        if payload["exp"] < int(time.time()):
+            raise HTTPException(status_code=401, detail="登录已过期，请重新登录。")
+
+        return payload
+
+    except Exception:
+        raise HTTPException(status_code=401, detail="请先登录。")
+
+
+def get_current_user(authorization: str = Header(default="")):
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="请先登录。")
+
+    token = authorization.replace("Bearer ", "")
+    payload = read_token(token)
+
+    users = load_users()
+    for user in users:
+        if user["username"] == payload["username"]:
+            return user
+
+    raise HTTPException(status_code=401, detail="用户不存在。")
+
+app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
@@ -45,6 +135,16 @@ ALLOWED_EXTENSIONS = {".txt", ".docx", ".pdf"}
 class ChatRequest(BaseModel):
     question: str
 
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    role: str = "staff"
+    department: str = "default"
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 class AskDocRequest(BaseModel):
     question: str
@@ -208,7 +308,16 @@ def rebuild_chroma():
 
 
 @app.post("/upload-doc")
-def upload_doc(file: UploadFile = File(...)):
+def upload_doc(
+    file: UploadFile = File(...),
+    current_user=Depends(get_current_user)
+):
+    if current_user["role"] not in ["admin", "manager"]:
+        raise HTTPException(
+            status_code=403,
+            detail="权限不足，只有管理员或部门负责人可以上传文档。"
+        )
+
     file_extension = Path(file.filename).suffix.lower()
 
     if file_extension not in ALLOWED_EXTENSIONS:
@@ -228,7 +337,10 @@ def upload_doc(file: UploadFile = File(...)):
         "message": "文件上传成功，知识库已更新",
         "file_name": file.filename,
         "saved_path": str(save_path),
-        "chunk_count": chunk_count
+        "chunk_count": chunk_count,
+        "uploaded_by": current_user["username"],
+        "role": current_user["role"],
+        "department": current_user["department"]
     }
 
 @app.get("/documents")
@@ -266,7 +378,73 @@ def delete_document(file_name: str):
         "chunk_count": chunk_count
     }
 
+@app.post("/register")
+def register(request: RegisterRequest):
+    username = request.username.strip()
+    password = request.password.strip()
+    role = request.role.strip()
+    department = request.department.strip()
 
+    if username == "" or password == "":
+        raise HTTPException(status_code=400, detail="用户名和密码不能为空。")
+
+    users = load_users()
+
+    for user in users:
+        if user["username"] == username:
+            raise HTTPException(status_code=400, detail="用户名已存在。")
+
+    new_user = {
+        "username": username,
+        "password_hash": hash_password(password),
+        "role": role,
+        "department": department,
+        "created_at": int(time.time())
+    }
+
+    users.append(new_user)
+    save_users(users)
+
+    return {
+        "message": "注册成功",
+        "username": username,
+        "role": role,
+        "department": department
+    }
+
+
+@app.post("/login")
+def login(request: LoginRequest):
+    username = request.username.strip()
+    password = request.password.strip()
+
+    users = load_users()
+
+    for user in users:
+        if user["username"] == username:
+            if verify_password(password, user["password_hash"]):
+                token = create_token(username)
+
+                return {
+                    "message": "登录成功",
+                    "token": token,
+                    "user": {
+                        "username": user["username"],
+                        "role": user["role"],
+                        "department": user["department"]
+                    }
+                }
+
+    raise HTTPException(status_code=401, detail="用户名或密码错误。")
+
+
+@app.get("/me")
+def me(current_user=Depends(get_current_user)):
+    return {
+        "username": current_user["username"],
+        "role": current_user["role"],
+        "department": current_user["department"]
+    }
 @app.post("/chat")
 def chat(request: ChatRequest):
     question = request.question.strip()

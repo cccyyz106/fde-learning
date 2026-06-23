@@ -1,0 +1,16 @@
+[
+  {
+    "username": "admin",
+    "password_hash": "$2b$12$KXmQvx5luhuM6SZlwte0V.w8s2.ft5N5lyLjO4sJC1pB987HCpFY.",
+    "role": "admin",
+    "department": "all",
+    "created_at": 1782204948
+  },
+  {
+    "username": "staff1",
+    "password_hash": "$2b$12$rvVghO.72F/bYOSHHfh5g.4b3UPoJX9qL664stEkvKaCuCc3CcVMa",
+    "role": "staff",
+    "department": "hr",
+    "created_at": 1782206550
+  }
+]

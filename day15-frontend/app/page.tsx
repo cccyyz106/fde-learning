@@ -1,8 +1,20 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-const API_BASE_URL = "http://47.108.136.208:8000";
+const SOURCE_DISPLAY_THRESHOLD = 0.15;
+
+function getApiBaseUrl() {
+  if (typeof window === "undefined") return "";
+
+  const host = window.location.hostname;
+
+  if (host === "localhost" || host === "127.0.0.1") {
+    return "http://127.0.0.1:8000";
+  }
+
+  return "/api";
+}
 
 type Source = {
   file_name?: string;
@@ -21,6 +33,7 @@ type DocumentItem = {
   file_name: string;
   size?: number;
 };
+
 type HistoryItem = {
   question: string;
   answer: string;
@@ -28,7 +41,15 @@ type HistoryItem = {
   feedback?: string;
 };
 
+type CurrentUser = {
+  username: string;
+  role: string;
+  department: string;
+};
+
 export default function Home() {
+  const apiBaseUrl = useMemo(() => getApiBaseUrl(), []);
+
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
@@ -45,12 +66,17 @@ export default function Home() {
   const [errorText, setErrorText] = useState("");
   const [history, setHistory] = useState<HistoryItem[]>([]);
 
+  const [token, setToken] = useState("");
+  const [loginUsername, setLoginUsername] = useState("admin");
+  const [loginPassword, setLoginPassword] = useState("123456");
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-  loadDocuments();
-  loadHistory();
-}, []);
+    loadDocuments();
+    loadHistory();
+  }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -58,10 +84,8 @@ export default function Home() {
 
   async function loadDocuments() {
     try {
-      const response = await fetch(`${API_BASE_URL}/documents`);
-      if (!response.ok) {
-        throw new Error("获取文档列表失败");
-      }
+      const response = await fetch(`${apiBaseUrl}/documents`);
+      if (!response.ok) throw new Error("获取文档列表失败");
 
       const data = await response.json();
       setDocuments(data.documents || []);
@@ -69,42 +93,43 @@ export default function Home() {
       setDocuments([]);
     }
   }
+
   async function loadHistory() {
-  try {
-    const response = await fetch(`${API_BASE_URL}/history`);
+    try {
+      const response = await fetch(`${apiBaseUrl}/history`);
+      if (!response.ok) throw new Error("获取历史记录失败");
 
-    if (!response.ok) {
-      throw new Error("获取历史记录失败");
+      const data = await response.json();
+      setHistory(data.history || []);
+    } catch {
+      setHistory([]);
     }
-
-    const data = await response.json();
-    setHistory(data.history || []);
-  } catch {
-    setHistory([]);
   }
-}
-async function submitFeedback(createdAt: string, feedback: "useful" | "not_useful") {
-  try {
-    const response = await fetch(`${API_BASE_URL}/feedback`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        created_at: createdAt,
-        feedback,
-      }),
-    });
 
-    if (!response.ok) {
-      throw new Error("提交反馈失败");
+  async function submitFeedback(
+    createdAt: string,
+    feedback: "useful" | "not_useful"
+  ) {
+    try {
+      const response = await fetch(`${apiBaseUrl}/feedback`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          created_at: createdAt,
+          feedback,
+        }),
+      });
+
+      if (!response.ok) throw new Error("提交反馈失败");
+
+      await loadHistory();
+    } catch {
+      setErrorText("反馈提交失败，请检查后端是否正常运行。");
     }
-
-    await loadHistory();
-  } catch {
-    setErrorText("反馈提交失败，请检查后端是否正常运行。");
   }
-}
+
   async function sendMessage() {
     const text = question.trim();
 
@@ -113,16 +138,18 @@ async function submitFeedback(createdAt: string, feedback: "useful" | "not_usefu
     setErrorText("");
     setQuestion("");
 
-    const userMessage: Message = {
-      role: "user",
-      content: text,
-    };
+    setMessages((prev) => [
+      ...prev,
+      {
+        role: "user",
+        content: text,
+      },
+    ]);
 
-    setMessages((prev) => [...prev, userMessage]);
     setLoading(true);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/ask-doc`, {
+      const response = await fetch(`${apiBaseUrl}/ask-doc`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -132,45 +159,79 @@ async function submitFeedback(createdAt: string, feedback: "useful" | "not_usefu
         }),
       });
 
-      if (!response.ok) {
-        throw new Error(`请求失败，状态码：${response.status}`);
-      }
-
       const data = await response.json();
 
+      if (!response.ok) {
+        throw new Error(data.detail || `请求失败，状态码：${response.status}`);
+      }
+
       const sources: Source[] = Array.isArray(data.sources) ? data.sources : [];
-const highScoreSources = sources.filter((item) => {
-  const score = Number(item.score ?? 0);
-  return score > 0.3;
-});
+      const displaySources = sources.filter((item) => {
+        const score = Number(item.score ?? 0);
+        return score >= SOURCE_DISPLAY_THRESHOLD;
+      });
 
-const displaySources = highScoreSources;
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: data.answer || "我没有拿到有效回答。",
+          sources: displaySources,
+          hiddenSourceCount: sources.length - displaySources.length,
+        },
+      ]);
 
-const assistantMessage: Message = {
-  role: "assistant",
-  content: data.answer || "我没有拿到有效回答。",
-  sources: displaySources,
-  hiddenSourceCount: sources.length - displaySources.length,
-};
-
-      setMessages((prev) => [...prev, assistantMessage]);
-      loadHistory();
+      await loadHistory();
     } catch (error) {
-      const errorMessage: Message = {
-        role: "assistant",
-        content:
-          "后端暂时没有成功返回结果。请检查 FastAPI 是否已经启动，或者文档库是否已经建立。",
-      };
-
-      setMessages((prev) => [...prev, errorMessage]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content:
+            "后端暂时没有成功返回结果。请检查 FastAPI 是否已经启动，或者文档库是否已经建立。",
+        },
+      ]);
       setErrorText(error instanceof Error ? error.message : "未知错误");
     } finally {
       setLoading(false);
     }
   }
 
+  async function login() {
+    setErrorText("");
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username: loginUsername,
+          password: loginPassword,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "登录失败");
+      }
+
+      setToken(data.token);
+      setCurrentUser(data.user);
+    } catch (error) {
+      setErrorText(error instanceof Error ? error.message : "登录失败");
+    }
+  }
+
   async function uploadDocument() {
     if (!selectedFile || uploading) return;
+
+    if (!token) {
+      setErrorText("请先登录管理员账号，再上传文档。");
+      return;
+    }
 
     setUploading(true);
     setErrorText("");
@@ -179,13 +240,18 @@ const assistantMessage: Message = {
       const formData = new FormData();
       formData.append("file", selectedFile);
 
-      const response = await fetch(`${API_BASE_URL}/upload-doc`, {
+      const response = await fetch(`${apiBaseUrl}/upload-doc`, {
         method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
         body: formData,
       });
 
+      const data = await response.json();
+
       if (!response.ok) {
-        throw new Error(`上传失败，状态码：${response.status}`);
+        throw new Error(data.detail || `上传失败，状态码：${response.status}`);
       }
 
       setSelectedFile(null);
@@ -205,20 +271,32 @@ const assistantMessage: Message = {
 
     try {
       const response = await fetch(
-        `${API_BASE_URL}/documents/${encodeURIComponent(fileName)}`,
+        `${apiBaseUrl}/documents/${encodeURIComponent(fileName)}`,
         {
           method: "DELETE",
+          headers: token
+            ? {
+                Authorization: `Bearer ${token}`,
+              }
+            : undefined,
         }
       );
 
+      const data = await response.json().catch(() => ({}));
+
       if (!response.ok) {
-        throw new Error(`删除失败，状态码：${response.status}`);
+        throw new Error(data.detail || `删除失败，状态码：${response.status}`);
       }
 
       await loadDocuments();
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : "删除失败");
     }
+  }
+
+  function logout() {
+    setToken("");
+    setCurrentUser(null);
   }
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -280,11 +358,10 @@ const assistantMessage: Message = {
                               <div className="mb-1 flex flex-wrap items-center gap-2 text-[11px] font-medium text-[#86868b]">
                                 <span>{source.file_name || "未知文档"}</span>
                                 {typeof source.score === "number" && (
-                                  <span>
-                                    相似度：{source.score.toFixed(2)}
-                                  </span>
+                                  <span>相似度：{source.score.toFixed(2)}</span>
                                 )}
                               </div>
+
                               <p className="line-clamp-4">
                                 {source.content || "没有来源内容"}
                               </p>
@@ -293,14 +370,15 @@ const assistantMessage: Message = {
                         </div>
                       </details>
                     )}
+
                     {!isUser &&
-  message.sources &&
-  message.sources.length === 0 &&
-  (message.hiddenSourceCount ?? 0) > 0 && (
-    <p className="mt-3 rounded-2xl bg-[#f5f5f7] px-4 py-3 text-xs text-[#86868b]">
-      本次未展示高相似度来源，回答仅供参考。
-    </p>
-  )}
+                      message.sources &&
+                      message.sources.length === 0 &&
+                      (message.hiddenSourceCount ?? 0) > 0 && (
+                        <p className="mt-3 rounded-2xl bg-[#f5f5f7] px-4 py-3 text-xs text-[#86868b]">
+                          本次没有展示高相似度来源，回答仅供参考。
+                        </p>
+                      )}
                   </div>
                 </div>
               );
@@ -349,7 +427,65 @@ const assistantMessage: Message = {
             管理员文档管理
           </summary>
 
-          <div className="mt-5 grid gap-5 lg:grid-cols-[1fr_1.2fr]">
+          <div className="mt-5 grid gap-5 lg:grid-cols-3">
+            <div className="rounded-[22px] border border-[#e5e5ea] bg-white p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <p className="text-sm font-medium text-[#1d1d1f]">管理员登录</p>
+
+                {currentUser && (
+                  <span className="rounded-full bg-[#e8f5ec] px-2.5 py-1 text-xs font-medium text-[#1f7a3f]">
+                    已登录
+                  </span>
+                )}
+              </div>
+
+              {currentUser ? (
+                <div className="space-y-3">
+                  <div className="rounded-2xl bg-[#f5f5f7] px-3 py-3 text-sm text-[#515154]">
+                    <p>
+                      当前用户：
+                      <span className="font-medium text-[#1d1d1f]">
+                        {currentUser.username}
+                      </span>
+                    </p>
+                    <p>角色：{currentUser.role}</p>
+                    <p>部门：{currentUser.department}</p>
+                  </div>
+
+                  <button
+                    onClick={logout}
+                    className="w-full rounded-full bg-[#f5f5f7] px-4 py-2 text-sm font-medium text-[#1d1d1f] transition hover:bg-[#e5e5ea]"
+                  >
+                    退出登录
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <input
+                    value={loginUsername}
+                    onChange={(event) => setLoginUsername(event.target.value)}
+                    className="w-full rounded-xl border border-[#d2d2d7] px-3 py-2 text-sm outline-none transition focus:border-[#86868b]"
+                    placeholder="用户名"
+                  />
+
+                  <input
+                    value={loginPassword}
+                    onChange={(event) => setLoginPassword(event.target.value)}
+                    type="password"
+                    className="w-full rounded-xl border border-[#d2d2d7] px-3 py-2 text-sm outline-none transition focus:border-[#86868b]"
+                    placeholder="密码"
+                  />
+
+                  <button
+                    onClick={login}
+                    className="w-full rounded-full bg-[#1d1d1f] px-4 py-2 text-sm font-semibold text-white transition hover:bg-black"
+                  >
+                    登录
+                  </button>
+                </div>
+              )}
+            </div>
+
             <div className="rounded-[22px] border border-[#e5e5ea] bg-white p-4">
               <p className="mb-3 text-sm font-medium text-[#1d1d1f]">
                 上传企业文档
@@ -372,6 +508,12 @@ const assistantMessage: Message = {
               >
                 {uploading ? "上传中..." : "上传并更新知识库"}
               </button>
+
+              {!currentUser && (
+                <p className="mt-3 text-xs leading-5 text-[#86868b]">
+                  需要先登录管理员或部门负责人账号，才能上传文档。
+                </p>
+              )}
             </div>
 
             <div className="rounded-[22px] border border-[#e5e5ea] bg-white p-4">
@@ -416,62 +558,66 @@ const assistantMessage: Message = {
             </div>
           </div>
         </details>
+
         <details className="mt-4 rounded-[28px] border border-white/80 bg-white/70 px-5 py-4 shadow-[0_18px_60px_rgba(0,0,0,0.06)] backdrop-blur-xl">
-  <summary className="cursor-pointer text-sm font-semibold text-[#1d1d1f]">
-    最近提问记录
-  </summary>
+          <summary className="cursor-pointer text-sm font-semibold text-[#1d1d1f]">
+            最近提问记录
+          </summary>
 
-  <div className="mt-4 space-y-3">
-    {history.length === 0 ? (
-      <p className="rounded-2xl bg-[#f5f5f7] px-4 py-4 text-sm text-[#86868b]">
-        暂时还没有历史记录。
-      </p>
-    ) : (
-      history.slice(0, 8).map((item, index) => (
-        <div
-          key={index}
-          className="rounded-2xl border border-[#e5e5ea] bg-white px-4 py-3"
-        >
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <p className="truncate text-sm font-medium text-[#1d1d1f]">
-              {item.question}
-            </p>
-            <span className="shrink-0 text-xs text-[#86868b]">
-              {item.created_at}
-            </span>
+          <div className="mt-4 space-y-3">
+            {history.length === 0 ? (
+              <p className="rounded-2xl bg-[#f5f5f7] px-4 py-4 text-sm text-[#86868b]">
+                暂时还没有历史记录。
+              </p>
+            ) : (
+              history.slice(0, 8).map((item, index) => (
+                <div
+                  key={index}
+                  className="rounded-2xl border border-[#e5e5ea] bg-white px-4 py-3"
+                >
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <p className="truncate text-sm font-medium text-[#1d1d1f]">
+                      {item.question}
+                    </p>
+                    <span className="shrink-0 text-xs text-[#86868b]">
+                      {item.created_at}
+                    </span>
+                  </div>
+
+                  <p className="line-clamp-2 text-xs leading-5 text-[#6e6e73]">
+                    {item.answer}
+                  </p>
+
+                  <div className="mt-3 flex items-center gap-2">
+                    <button
+                      onClick={() => submitFeedback(item.created_at, "useful")}
+                      className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                        item.feedback === "useful"
+                          ? "bg-[#0071e3] text-white"
+                          : "bg-[#f5f5f7] text-[#515154] hover:bg-[#e5e5ea]"
+                      }`}
+                    >
+                      有用
+                    </button>
+
+                    <button
+                      onClick={() =>
+                        submitFeedback(item.created_at, "not_useful")
+                      }
+                      className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                        item.feedback === "not_useful"
+                          ? "bg-red-500 text-white"
+                          : "bg-[#f5f5f7] text-[#515154] hover:bg-[#e5e5ea]"
+                      }`}
+                    >
+                      没用
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
-
-          <p className="line-clamp-2 text-xs leading-5 text-[#6e6e73]">
-            {item.answer}
-          </p>
-          <div className="mt-3 flex items-center gap-2">
-  <button
-    onClick={() => submitFeedback(item.created_at, "useful")}
-    className={`rounded-full px-3 py-1 text-xs font-medium transition ${
-      item.feedback === "useful"
-        ? "bg-[#0071e3] text-white"
-        : "bg-[#f5f5f7] text-[#515154] hover:bg-[#e5e5ea]"
-    }`}
-  >
-    有用
-  </button>
-
-  <button
-    onClick={() => submitFeedback(item.created_at, "not_useful")}
-    className={`rounded-full px-3 py-1 text-xs font-medium transition ${
-      item.feedback === "not_useful"
-        ? "bg-red-500 text-white"
-        : "bg-[#f5f5f7] text-[#515154] hover:bg-[#e5e5ea]"
-    }`}
-  >
-    没用
-  </button>
-</div>
-        </div>
-      ))
-    )}
-  </div>
-</details>
+        </details>
       </div>
     </main>
   );
