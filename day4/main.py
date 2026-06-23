@@ -427,7 +427,7 @@ def ask_doc(request: AskDocRequest):
     if not os.getenv("DEEPSEEK_API_KEY"):
         raise HTTPException(status_code=500, detail="缺少 DEEPSEEK_API_KEY，请检查 .env 文件。")
 
-    search_results = search_chroma(question, top_k=3)
+    search_results = search_chroma(question, top_k=5)
 
 
 
